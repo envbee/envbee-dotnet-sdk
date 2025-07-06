@@ -1,0 +1,32 @@
+###############################################
+## Visual Studio (C# / .NET) build artefacts ##
+###############################################
+
+# User‑specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+[Dd]ebug*/
+[Rr]elease*/
+x64/
+x86/
+
+# Rider & VS Code metadata
+.idea/
+.vscode/
+
+# NuGet packages
+*.nupkg
+*.snupkg
+# fallback folder (dotnet restore --packages)
+packages/
+
+# Logs & others
+*.log
+*.vs/
