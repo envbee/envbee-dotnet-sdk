@@ -28,6 +28,7 @@ jobs:
             @semantic-release/commit-analyzer
             @semantic-release/release-notes-generator
             semantic-release-dotnet
+          args: '--project Envbee.SDK/Envbee.SDK.csproj'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
