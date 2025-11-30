@@ -4,6 +4,11 @@
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
-    ["semantic-release-dotnet", { "project": "Envbee.SDK/Envbee.SDK.csproj" }]
+    [
+      "semantic-release-dotnet",
+      {
+        "paths": ["Envbee.SDK/Envbee.SDK.csproj", "Directory.Build.props"]
+      }
+    ]
   ]
 }

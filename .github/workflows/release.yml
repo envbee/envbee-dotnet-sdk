@@ -33,7 +33,7 @@ jobs:
       - name: Pack & Push
         if: steps.semrel.outputs.new_release_published == 'true'
         run: |
-          dotnet pack Envbee.SDK/Envbee.SDK.csproj -c Release -o ./artifacts -p:Version=${{ steps.semrel.outputs.release_version }}
+          dotnet pack Envbee.SDK/Envbee.SDK.csproj -c Release -o ./artifacts
           dotnet nuget push ./artifacts/*.nupkg \
             --api-key ${{ secrets.NUGET_API_KEY }} \
             --source https://api.nuget.org/v3/index.json 
