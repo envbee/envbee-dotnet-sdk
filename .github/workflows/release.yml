@@ -23,7 +23,6 @@ jobs:
         id: semrel
         uses: cycjimmy/semantic-release-action@v4
         with:
-          working_directory: ./Envbee.SDK
           extra_plugins: |
             semantic-release-dotnet
         env:
