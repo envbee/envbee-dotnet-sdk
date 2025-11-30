@@ -14,10 +14,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-dotnet@v4
-        with: { dotnet-version: '8.0.x' }
+        with:
+          dotnet-version: "8.0.x"
 
       - name: Semantic Release
         id: semrel
@@ -27,13 +29,6 @@ jobs:
           extra_plugins: |
             semantic-release-dotnet
         env:
+          # GitHub token for creating tags/releases
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Pack & Push
-        if: steps.semrel.outputs.new_release_published == 'true'
-        run: |
-          dotnet pack Envbee.SDK/Envbee.SDK.csproj -c Release -o ./artifacts
-          dotnet nuget push ./artifacts/*.nupkg \
-            --api-key ${{ secrets.NUGET_API_KEY }} \
-            --source https://api.nuget.org/v3/index.json \
-            --skip-duplicate
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}

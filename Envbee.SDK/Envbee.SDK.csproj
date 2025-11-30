@@ -8,7 +8,8 @@
 
     <!-- NuGet metadata -->
     <PackageId>Envbee.SDK</PackageId>
-    <Version>0.1.0-beta.0</Version>
+    <!-- Version is managed by semantic-release-dotnet -->
+    <Version></Version>
     <Authors>Envbee</Authors>
     <Company>Envbee</Company>
     <Description>Official .NET SDK for interacting with the Envbee platform.</Description>
@@ -31,8 +32,8 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="9.0.6" />
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.6" />
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="9.0.6" />
-    <None Include="..\README.md" Pack="true" PackagePath="\"/>
-    <None Include="..\LICENSE" Pack="true" PackagePath="\"/>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\LICENSE" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>
