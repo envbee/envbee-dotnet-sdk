@@ -26,7 +26,6 @@ jobs:
           branch: main
           extra_plugins: |
             semantic-release-dotnet
-          args: '--project Envbee.SDK/Envbee.SDK.csproj'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
