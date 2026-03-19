@@ -63,4 +63,25 @@ internal sealed class FileCache : ICacheStore
             _logger.LogError(ex, "Failed to write cache.");
         }
     }
+
+    public IEnumerable<KeyValuePair<string, string>> GetAll()
+    {
+        try
+        {
+            lock (_lock)
+            {
+                if (!File.Exists(_filePath))
+                    return Enumerable.Empty<KeyValuePair<string, string>>();
+
+                var json = File.ReadAllText(_filePath);
+                var dict = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+                return dict?.ToArray() ?? Enumerable.Empty<KeyValuePair<string, string>>();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to enumerate cache.");
+            return Enumerable.Empty<KeyValuePair<string, string>>();
+        }
+    }
 }

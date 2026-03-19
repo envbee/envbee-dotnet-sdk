@@ -145,6 +145,133 @@ public sealed class EnvbeeClient
 
         return (data, meta!);
     }
+
+    /// <summary>
+    /// Fetch a paginated list of typed variables.
+    /// </summary>
+    public async Task<(IReadOnlyList<Variable> Data, Metadata Meta)> GetVariablesTypedAsync(
+        int? offset = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var (rawData, meta) = await GetVariablesAsync(offset, limit, ct);
+        var data = rawData.Select(ParseVariable).ToList();
+        return (data, meta);
+    }
+
+    /// <summary>
+    /// Fetch a paginated list of variables values.
+    /// </summary>
+    public async Task<(IReadOnlyList<JsonElement> Data, Metadata Meta)> GetVariablesValuesAsync(
+        int? offset = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var path = "/v1/variables-values";
+        var query = new Dictionary<string, object?>();
+        if (offset.HasValue) query["offset"] = offset;
+        if (limit.HasValue) query["limit"] = limit;
+        path = UrlHelpers.AddQueryString(path, query);
+
+        var json = await SendRequestAsync(path, ct);
+        var meta = JsonSerializer.Deserialize<Metadata>(json.GetProperty("metadata").GetRawText(), serializerOptions);
+        var data = json.GetProperty("data").EnumerateArray().ToList();
+
+        return (data, meta!);
+    }
+
+    /// <summary>
+    /// Fetch a paginated list of typed variable values.
+    /// </summary>
+    public async Task<(IReadOnlyList<VariableValue> Data, Metadata Meta)> GetVariablesValuesTypedAsync(
+        int? offset = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var (rawData, meta) = await GetVariablesValuesAsync(offset, limit, ct);
+        var data = rawData.Select(ParseVariableValue).ToList();
+        return (data, meta);
+    }
+
+    /// <summary>
+    /// Fills process environment variables using envbee definitions and values.
+    /// If API calls fail, falls back to locally cached values.
+    /// </summary>
+    public async Task FillEnvVarsAsync(IReadOnlyCollection<string>? variableNames = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var allVariables = (await GetVariablesTypedAsync(ct: ct)).Data;
+            var allValues = (await GetVariablesValuesTypedAsync(ct: ct)).Data
+                .ToDictionary(v => v.VariableId, v => v);
+
+            foreach (var variable in allVariables)
+            {
+                var name = variable.Name;
+
+                if (variableNames is not null && !variableNames.Contains(name))
+                {
+                    _logger.LogDebug("Skipping variable {Var} as it's not in the specified list.", name);
+                    continue;
+                }
+
+                try
+                {
+                    if (!allValues.TryGetValue(variable.Id, out var valueEntry))
+                    {
+                        _logger.LogWarning("Variable {Var} has no associated value entry.", name);
+                        continue;
+                    }
+
+                    if (!valueEntry.Content.TryGetProperty("value", out var rawValue))
+                    {
+                        _logger.LogWarning("Variable {Var} has invalid value payload.", name);
+                        continue;
+                    }
+
+                    if (rawValue.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                        continue;
+
+                    var finalValue = rawValue.ValueKind == JsonValueKind.String
+                        ? MaybeDecrypt(rawValue.GetString() ?? string.Empty)
+                        : rawValue.ToString();
+
+                    Environment.SetEnvironmentVariable(name, finalValue);
+                    _logger.LogDebug("Set environment variable: {Var}", name);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error fetching or setting variable {Var}", name);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fill env vars from API. Falling back to cache.");
+            try
+            {
+                foreach (var kv in _cache.GetAll())
+                {
+                    var name = kv.Key;
+                    if (variableNames is not null && !variableNames.Contains(name))
+                    {
+                        _logger.LogDebug("Skipping variable {Var} as it's not in the specified list.", name);
+                        continue;
+                    }
+
+                    var cached = kv.Value;
+                    var finalValue = MaybeDecrypt(cached);
+                    Environment.SetEnvironmentVariable(name, finalValue);
+                    _logger.LogDebug("Set environment variable from cache: {Var}", name);
+                }
+            }
+            catch (Exception cacheEx)
+            {
+                _logger.LogError(cacheEx, "Failed to fill environment variables from API and cache.");
+                throw;
+            }
+        }
+    }
     #endregion
 
     #region internals
@@ -262,6 +389,35 @@ public sealed class EnvbeeClient
         {
             throw new DecryptionException("Decryption failed. Invalid key or corrupted data.", ex);
         }
+    }
+
+    private static Variable ParseVariable(JsonElement elem)
+    {
+        var id = elem.GetProperty("id").GetInt64();
+        var name = elem.GetProperty("name").GetString()
+            ?? throw new JsonException("Variable name is required.");
+        var typeRaw = elem.GetProperty("type").GetString()
+            ?? throw new JsonException("Variable type is required.");
+
+        if (!Enum.TryParse<VariableType>(typeRaw, ignoreCase: true, out var variableType))
+            throw new JsonException($"Unknown variable type: {typeRaw}");
+
+        string? description = null;
+        if (elem.TryGetProperty("description", out var descriptionElem) &&
+            descriptionElem.ValueKind != JsonValueKind.Null)
+        {
+            description = descriptionElem.GetString();
+        }
+
+        return new Variable(id, variableType, name, description);
+    }
+
+    private static VariableValue ParseVariableValue(JsonElement elem)
+    {
+        var id = elem.GetProperty("id").GetInt64();
+        var variableId = elem.GetProperty("variable_id").GetInt64();
+        var content = elem.GetProperty("content").Clone();
+        return new VariableValue(id, variableId, content);
     }
     #endregion
 }

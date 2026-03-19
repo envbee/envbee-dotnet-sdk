@@ -155,6 +155,147 @@ public class EnvbeeClientMainTests
         Assert.Equal(100, md.Total);
     }
 
+    [Fact]
+    public async Task GetVariablesTyped_Simple()
+    {
+        var payload = new
+        {
+            metadata = new { limit = 1, offset = 10, total = 100 },
+            data = new[]
+            {
+                new { id = 1, type = "STRING",  name = "VAR1", description = "desc1" },
+                new { id = 2, type = "BOOLEAN", name = "VAR2", description = "desc2" }
+            }
+        };
+
+        var client = CreateClient(_ => JsonResp(payload));
+        var (vars, md) = await client.GetVariablesTypedAsync();
+
+        Assert.Equal("desc1", vars.First(v => v.Name == "VAR1").Description);
+        Assert.Equal(VariableType.STRING, vars.First(v => v.Name == "VAR1").Type);
+        Assert.Equal(100, md.Total);
+    }
+
+    [Fact]
+    public async Task GetVariablesValuesTyped_Simple()
+    {
+        var payload = new
+        {
+            metadata = new { limit = 2, offset = 0, total = 2 },
+            data = new object[]
+            {
+                new { id = 1, variable_id = 1, content = new Dictionary<string, object> { ["value"] = "Value1" } },
+                new { id = 2, variable_id = 2, content = new Dictionary<string, object> { ["value"] = true } }
+            }
+        };
+
+        var client = CreateClient(_ => JsonResp(payload));
+        var (values, md) = await client.GetVariablesValuesTypedAsync();
+
+        Assert.Equal("Value1", values.First(v => v.VariableId == 1).Content.GetProperty("value").GetString());
+        Assert.True(values.First(v => v.VariableId == 2).Content.GetProperty("value").GetBoolean());
+        Assert.Equal(2, md.Total);
+    }
+
+    [Fact]
+    public async Task FillEnvVars_SetsEnvironmentVariables()
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+
+            var client = CreateClient(req =>
+            {
+                var path = req.RequestUri!.AbsolutePath;
+
+                if (path == "/v1/variables")
+                {
+                    return JsonResp(new
+                    {
+                        metadata = new { limit = 2, offset = 0, total = 2 },
+                        data = new[]
+                        {
+                            new { id = 1, name = "VAR1", type = "STRING", description = "desc1" },
+                            new { id = 2, name = "VAR2", type = "BOOLEAN", description = "desc2" }
+                        }
+                    });
+                }
+
+                if (path == "/v1/variables-values")
+                {
+                    return JsonResp(new
+                    {
+                        metadata = new { limit = 2, offset = 0, total = 2 },
+                        data = new object[]
+                        {
+                            new { id = 1, variable_id = 1, content = new Dictionary<string, object> { ["value"] = "Value1" } },
+                            new { id = 2, variable_id = 2, content = new Dictionary<string, object> { ["value"] = true } }
+                        }
+                    });
+                }
+
+                return JsonResp(new { }, HttpStatusCode.InternalServerError);
+            });
+
+            await client.FillEnvVarsAsync();
+
+            Assert.Equal("Value1", Environment.GetEnvironmentVariable("VAR1"));
+            Assert.Equal("True", Environment.GetEnvironmentVariable("VAR2"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+        }
+    }
+
+    [Fact]
+    public async Task FillEnvVars_UsesCacheFallback()
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+
+            var cache = new MemoryCache();
+            var failFillRequests = false;
+
+            var client = CreateClient(req =>
+            {
+                var path = req.RequestUri!.AbsolutePath;
+
+                if (failFillRequests && (path == "/v1/variables" || path == "/v1/variables-values"))
+                    return JsonResp(new { }, HttpStatusCode.InternalServerError);
+
+                if (path == "/v1/variables-values-by-name/VAR1/content")
+                    return JsonResp(new { value = "ValueFromCache1" });
+
+                if (path == "/v1/variables-values-by-name/VAR2/content")
+                    return JsonResp(new { value = true });
+
+                if (path == "/v1/variables" || path == "/v1/variables-values")
+                    return JsonResp(new { }, HttpStatusCode.InternalServerError);
+
+                return JsonResp(new { }, HttpStatusCode.InternalServerError);
+            }, cacheStore: cache);
+
+            await client.GetAsync("VAR1");
+            await client.GetAsync("VAR2");
+
+            failFillRequests = true;
+            await client.FillEnvVarsAsync();
+
+            Assert.Equal("ValueFromCache1", Environment.GetEnvironmentVariable("VAR1"));
+            Assert.Equal("True", Environment.GetEnvironmentVariable("VAR2"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+        }
+    }
+
     /* ---------- helper ---------- */
     private static EnvbeeClient CreateClient(
         Func<HttpRequestMessage, HttpResponseMessage?> responder,

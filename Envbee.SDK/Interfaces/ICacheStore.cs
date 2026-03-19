@@ -14,4 +14,9 @@ public interface ICacheStore
     /// Sets a value to the internal store
     /// </summary>
     void Set(string key, string value);
+
+    /// <summary>
+    /// Enumerates all cached key/value pairs.
+    /// </summary>
+    IEnumerable<KeyValuePair<string, string>> GetAll();
 }
