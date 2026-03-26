@@ -29,16 +29,19 @@ public sealed class EnvbeeClient
     private readonly AesGcm? _aesGcm;
     private readonly ILogger _logger;
     private readonly ICacheStore _cache;
+    private readonly TimeSpan _requestTimeout;
     private static HttpClient _http = new()
     {
-        Timeout = TimeSpan.FromSeconds(4)
+        Timeout = Timeout.InfiniteTimeSpan
     };
 
     private static readonly JsonSerializerOptions serializerOptions = new() { PropertyNameCaseInsensitive = true };
 
     internal static void OverrideHttpClient(HttpClient custom)
     {
-        _http = custom ?? throw new ArgumentNullException(nameof(custom));
+        if (custom is null) throw new ArgumentNullException(nameof(custom));
+        custom.Timeout = Timeout.InfiniteTimeSpan;
+        _http = custom;
     }
 
 
@@ -50,7 +53,9 @@ public sealed class EnvbeeClient
         string? apiKey = null,
         Secret apiSecret = default,
         Secret encKey = default,
-        string? baseUrl = null)
+        string? baseUrl = null,
+        string? cachePath = null,
+        double? timeoutSeconds = null)
     {
         _logger = LoggerFactory.Create(b => b.AddDebug()).CreateLogger<EnvbeeClient>();
 
@@ -82,11 +87,27 @@ public sealed class EnvbeeClient
             _logger.LogDebug("No encryption key provided");
         }
 
-        _cache = new FileCache(_apiKey, _logger);
+        var parsedTimeout = timeoutSeconds.GetValueOrDefault(4);
+        _requestTimeout = TimeSpan.FromSeconds(parsedTimeout > 0 ? parsedTimeout : 4);
+
+        _cache = CreateCacheStore(_apiKey, cachePath);
 
         _logger.LogInformation("EnvbeeClient initialized for {BaseUrl}.", _baseUrl);
     }
     #endregion
+
+    private ICacheStore CreateCacheStore(string apiKey, string? cachePath)
+    {
+        try
+        {
+            return new FileCache(apiKey, _logger, cachePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cache path is unavailable. Falling back to in-memory cache only.");
+            return new MemoryCacheStore();
+        }
+    }
 
     #region public API
 
@@ -267,8 +288,7 @@ public sealed class EnvbeeClient
             }
             catch (Exception cacheEx)
             {
-                _logger.LogError(cacheEx, "Failed to fill environment variables from API and cache.");
-                throw;
+                _logger.LogWarning(cacheEx, "Failed to fill environment variables from API and cache.");
             }
         }
     }
@@ -326,15 +346,17 @@ public sealed class EnvbeeClient
 
         try
         {
-            using var resp = await _http.SendAsync(req, ct);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(_requestTimeout);
+            using var resp = await _http.SendAsync(req, timeoutCts.Token);
             if (resp.StatusCode == HttpStatusCode.OK)
             {
-                var stream = await resp.Content.ReadAsStreamAsync(ct);
-                var json = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+                var stream = await resp.Content.ReadAsStreamAsync(timeoutCts.Token);
+                var json = await JsonDocument.ParseAsync(stream, cancellationToken: timeoutCts.Token);
                 return json.RootElement.Clone();
             }
 
-            var payload = await resp.Content.ReadAsStringAsync(ct);
+            var payload = await resp.Content.ReadAsStringAsync(timeoutCts.Token);
             throw new RequestException(resp.StatusCode, $"Request failed: {payload}");
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
