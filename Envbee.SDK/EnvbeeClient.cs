@@ -29,16 +29,19 @@ public sealed class EnvbeeClient
     private readonly AesGcm? _aesGcm;
     private readonly ILogger _logger;
     private readonly ICacheStore _cache;
+    private readonly TimeSpan _requestTimeout;
     private static HttpClient _http = new()
     {
-        Timeout = TimeSpan.FromSeconds(4)
+        Timeout = Timeout.InfiniteTimeSpan
     };
 
     private static readonly JsonSerializerOptions serializerOptions = new() { PropertyNameCaseInsensitive = true };
 
     internal static void OverrideHttpClient(HttpClient custom)
     {
-        _http = custom ?? throw new ArgumentNullException(nameof(custom));
+        if (custom is null) throw new ArgumentNullException(nameof(custom));
+        custom.Timeout = Timeout.InfiniteTimeSpan;
+        _http = custom;
     }
 
 
@@ -50,7 +53,9 @@ public sealed class EnvbeeClient
         string? apiKey = null,
         Secret apiSecret = default,
         Secret encKey = default,
-        string? baseUrl = null)
+        string? baseUrl = null,
+        string? cachePath = null,
+        double? timeoutSeconds = null)
     {
         _logger = LoggerFactory.Create(b => b.AddDebug()).CreateLogger<EnvbeeClient>();
 
@@ -82,11 +87,27 @@ public sealed class EnvbeeClient
             _logger.LogDebug("No encryption key provided");
         }
 
-        _cache = new FileCache(_apiKey, _logger);
+        var parsedTimeout = timeoutSeconds.GetValueOrDefault(4);
+        _requestTimeout = TimeSpan.FromSeconds(parsedTimeout > 0 ? parsedTimeout : 4);
+
+        _cache = CreateCacheStore(_apiKey, cachePath);
 
         _logger.LogInformation("EnvbeeClient initialized for {BaseUrl}.", _baseUrl);
     }
     #endregion
+
+    private ICacheStore CreateCacheStore(string apiKey, string? cachePath)
+    {
+        try
+        {
+            return new FileCache(apiKey, _logger, cachePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cache path is unavailable. Falling back to in-memory cache only.");
+            return new MemoryCacheStore();
+        }
+    }
 
     #region public API
 
@@ -145,6 +166,132 @@ public sealed class EnvbeeClient
 
         return (data, meta!);
     }
+
+    /// <summary>
+    /// Fetch a paginated list of typed variables.
+    /// </summary>
+    public async Task<(IReadOnlyList<Variable> Data, Metadata Meta)> GetVariablesTypedAsync(
+        int? offset = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var (rawData, meta) = await GetVariablesAsync(offset, limit, ct);
+        var data = rawData.Select(ParseVariable).ToList();
+        return (data, meta);
+    }
+
+    /// <summary>
+    /// Fetch a paginated list of variables values.
+    /// </summary>
+    public async Task<(IReadOnlyList<JsonElement> Data, Metadata Meta)> GetVariablesValuesAsync(
+        int? offset = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var path = "/v1/variables-values";
+        var query = new Dictionary<string, object?>();
+        if (offset.HasValue) query["offset"] = offset;
+        if (limit.HasValue) query["limit"] = limit;
+        path = UrlHelpers.AddQueryString(path, query);
+
+        var json = await SendRequestAsync(path, ct);
+        var meta = JsonSerializer.Deserialize<Metadata>(json.GetProperty("metadata").GetRawText(), serializerOptions);
+        var data = json.GetProperty("data").EnumerateArray().ToList();
+
+        return (data, meta!);
+    }
+
+    /// <summary>
+    /// Fetch a paginated list of typed variable values.
+    /// </summary>
+    public async Task<(IReadOnlyList<VariableValue> Data, Metadata Meta)> GetVariablesValuesTypedAsync(
+        int? offset = null,
+        int? limit = null,
+        CancellationToken ct = default)
+    {
+        var (rawData, meta) = await GetVariablesValuesAsync(offset, limit, ct);
+        var data = rawData.Select(ParseVariableValue).ToList();
+        return (data, meta);
+    }
+
+    /// <summary>
+    /// Fills process environment variables using envbee definitions and values.
+    /// If API calls fail, falls back to locally cached values.
+    /// </summary>
+    public async Task FillEnvVarsAsync(IReadOnlyCollection<string>? variableNames = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var allVariables = (await GetVariablesTypedAsync(ct: ct)).Data;
+            var allValues = (await GetVariablesValuesTypedAsync(ct: ct)).Data
+                .ToDictionary(v => v.VariableId, v => v);
+
+            foreach (var variable in allVariables)
+            {
+                var name = variable.Name;
+
+                if (variableNames is not null && !variableNames.Contains(name))
+                {
+                    _logger.LogDebug("Skipping variable {Var} as it's not in the specified list.", name);
+                    continue;
+                }
+
+                try
+                {
+                    if (!allValues.TryGetValue(variable.Id, out var valueEntry))
+                    {
+                        _logger.LogWarning("Variable {Var} has no associated value entry.", name);
+                        continue;
+                    }
+
+                    if (!valueEntry.Content.TryGetProperty("value", out var rawValue))
+                    {
+                        _logger.LogWarning("Variable {Var} has invalid value payload.", name);
+                        continue;
+                    }
+
+                    if (rawValue.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                        continue;
+
+                    var finalValue = rawValue.ValueKind == JsonValueKind.String
+                        ? MaybeDecrypt(rawValue.GetString() ?? string.Empty)
+                        : rawValue.ToString();
+
+                    Environment.SetEnvironmentVariable(name, finalValue);
+                    _logger.LogDebug("Set environment variable: {Var}", name);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error fetching or setting variable {Var}", name);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fill env vars from API. Falling back to cache.");
+            try
+            {
+                foreach (var kv in _cache.GetAll())
+                {
+                    var name = kv.Key;
+                    if (variableNames is not null && !variableNames.Contains(name))
+                    {
+                        _logger.LogDebug("Skipping variable {Var} as it's not in the specified list.", name);
+                        continue;
+                    }
+
+                    var cached = kv.Value;
+                    var finalValue = MaybeDecrypt(cached);
+                    Environment.SetEnvironmentVariable(name, finalValue);
+                    _logger.LogDebug("Set environment variable from cache: {Var}", name);
+                }
+            }
+            catch (Exception cacheEx)
+            {
+                _logger.LogWarning(cacheEx, "Failed to fill environment variables from API and cache.");
+            }
+        }
+    }
     #endregion
 
     #region internals
@@ -199,15 +346,17 @@ public sealed class EnvbeeClient
 
         try
         {
-            using var resp = await _http.SendAsync(req, ct);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(_requestTimeout);
+            using var resp = await _http.SendAsync(req, timeoutCts.Token);
             if (resp.StatusCode == HttpStatusCode.OK)
             {
-                var stream = await resp.Content.ReadAsStreamAsync(ct);
-                var json = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+                var stream = await resp.Content.ReadAsStreamAsync(timeoutCts.Token);
+                var json = await JsonDocument.ParseAsync(stream, cancellationToken: timeoutCts.Token);
                 return json.RootElement.Clone();
             }
 
-            var payload = await resp.Content.ReadAsStringAsync(ct);
+            var payload = await resp.Content.ReadAsStringAsync(timeoutCts.Token);
             throw new RequestException(resp.StatusCode, $"Request failed: {payload}");
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
@@ -262,6 +411,35 @@ public sealed class EnvbeeClient
         {
             throw new DecryptionException("Decryption failed. Invalid key or corrupted data.", ex);
         }
+    }
+
+    private static Variable ParseVariable(JsonElement elem)
+    {
+        var id = elem.GetProperty("id").GetInt64();
+        var name = elem.GetProperty("name").GetString()
+            ?? throw new JsonException("Variable name is required.");
+        var typeRaw = elem.GetProperty("type").GetString()
+            ?? throw new JsonException("Variable type is required.");
+
+        if (!Enum.TryParse<VariableType>(typeRaw, ignoreCase: true, out var variableType))
+            throw new JsonException($"Unknown variable type: {typeRaw}");
+
+        string? description = null;
+        if (elem.TryGetProperty("description", out var descriptionElem) &&
+            descriptionElem.ValueKind != JsonValueKind.Null)
+        {
+            description = descriptionElem.GetString();
+        }
+
+        return new Variable(id, variableType, name, description);
+    }
+
+    private static VariableValue ParseVariableValue(JsonElement elem)
+    {
+        var id = elem.GetProperty("id").GetInt64();
+        var variableId = elem.GetProperty("variable_id").GetInt64();
+        var content = elem.GetProperty("content").Clone();
+        return new VariableValue(id, variableId, content);
     }
     #endregion
 }

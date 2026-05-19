@@ -15,6 +15,8 @@ namespace Envbee.SDK
         private Secret _apiSecret = default;
         private Secret _encKey = default;
         private HttpMessageHandler? _handler;
+        private string? _cachePath;
+        private double? _timeoutSeconds;
 
         private EnvbeeClientBuilder() { }
 
@@ -62,6 +64,24 @@ namespace Envbee.SDK
         }
 
         /// <summary>
+        /// Sets a custom cache directory path.
+        /// </summary>
+        public EnvbeeClientBuilder WithCachePath(string cachePath)
+        {
+            _cachePath = cachePath;
+            return this;
+        }
+
+        /// <summary>
+        /// Sets request timeout in seconds.
+        /// </summary>
+        public EnvbeeClientBuilder WithTimeoutSeconds(double timeoutSeconds)
+        {
+            _timeoutSeconds = timeoutSeconds;
+            return this;
+        }
+
+        /// <summary>
         /// Builds the configured <see cref="EnvbeeClient"/>.
         /// </summary>
         public EnvbeeClient Build()
@@ -75,14 +95,16 @@ namespace Envbee.SDK
                 apiKey: _apiKey,
                 apiSecret: _apiSecret,
                 encKey: _encKey,
-                baseUrl: _baseUrl);
+                baseUrl: _baseUrl,
+                cachePath: _cachePath,
+                timeoutSeconds: _timeoutSeconds);
 
             // If the user provided a custom handler, swap the static HttpClient via reflection.
             if (_handler is not null)
             {
                 if (_handler is not null)
                 {
-                    var custom = new HttpClient(_handler) { Timeout = TimeSpan.FromSeconds(4) };
+                    var custom = new HttpClient(_handler) { Timeout = Timeout.InfiniteTimeSpan };
                     EnvbeeClient.OverrideHttpClient(custom);
                 }
             }

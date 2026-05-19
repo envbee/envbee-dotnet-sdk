@@ -20,11 +20,19 @@ public class EnvbeeClientMainTests
     private sealed class FakeHttpHandler : HttpMessageHandler
     {
         public Func<HttpRequestMessage, HttpResponseMessage?>? Responder { get; set; }
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken _)
+        public Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage?>>? AsyncResponder { get; set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
         {
+            if (AsyncResponder is not null)
+            {
+                var asyncResp = await AsyncResponder(req, ct);
+                return asyncResp ?? new HttpResponseMessage(HttpStatusCode.InternalServerError);
+            }
+
             var resp = Responder?.Invoke(req) ??
                        new HttpResponseMessage(HttpStatusCode.InternalServerError);
-            return Task.FromResult(resp);
+            return resp;
         }
     }
 
@@ -132,6 +140,94 @@ public class EnvbeeClientMainTests
         Assert.Equal(first, second);      // proviene de cache
     }
 
+    [Fact]
+    public async Task GetVariable_CachePath_CustomDirectory()
+    {
+        var customCachePath = Path.Combine(Path.GetTempPath(), $"envbee-test-cache-{Guid.NewGuid()}");
+
+        try
+        {
+            var client = CreateClient(
+                _ => JsonResp(new { value = "CustomPathValue" }),
+                cachePath: customCachePath);
+
+            var value = await client.GetAsync("VAR_CUSTOM_CACHE");
+            Assert.Equal("CustomPathValue", value);
+            Assert.True(File.Exists(Path.Combine(customCachePath, "variables.json")));
+        }
+        finally
+        {
+            if (Directory.Exists(customCachePath))
+                Directory.Delete(customCachePath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task GetVariable_FallsBackToMemory_WhenCachePathIsInvalid()
+    {
+        var fileAsDirectoryPath = Path.GetTempFileName();
+        try
+        {
+            int call = 0;
+            var client = CreateClient(_ =>
+            {
+                if (Interlocked.Increment(ref call) == 1)
+                    return JsonResp(new { value = "ValueFromMemoryFallback" });
+
+                return JsonResp(new { }, HttpStatusCode.InternalServerError);
+            }, cachePath: fileAsDirectoryPath);
+
+            var first = await client.GetAsync("VAR_MEMORY_FALLBACK");
+            var second = await client.GetAsync("VAR_MEMORY_FALLBACK");
+
+            Assert.Equal("ValueFromMemoryFallback", first);
+            Assert.Equal("ValueFromMemoryFallback", second);
+        }
+        finally
+        {
+            if (File.Exists(fileAsDirectoryPath))
+                File.Delete(fileAsDirectoryPath);
+        }
+    }
+
+    [Fact]
+    public async Task GetVariable_Timeout_FallsBackToCache()
+    {
+        var cache = new MemoryCache();
+        cache.Set("VAR_TIMEOUT", "CachedTimeoutValue");
+
+        var client = CreateClient(
+            _ => null,
+            asyncResponder: async (_, ct) =>
+            {
+                await Task.Delay(150, ct);
+                return JsonResp(new { value = "TooLate" });
+            },
+            cacheStore: cache,
+            timeoutSeconds: 0.01
+        );
+
+        var value = await client.GetAsync("VAR_TIMEOUT");
+        Assert.Equal("CachedTimeoutValue", value);
+    }
+
+    [Fact]
+    public async Task GetVariable_CustomTimeout_AllowsSlowResponse()
+    {
+        var client = CreateClient(
+            _ => null,
+            asyncResponder: async (_, ct) =>
+            {
+                await Task.Delay(30, ct);
+                return JsonResp(new { value = "Value1" });
+            },
+            timeoutSeconds: 1.0
+        );
+
+        var value = await client.GetAsync("VAR_TIMEOUT_OK");
+        Assert.Equal("Value1", value);
+    }
+
     /* 7) get_variables simple */
     [Fact]
     public async Task GetVariables_Simple()
@@ -155,13 +251,157 @@ public class EnvbeeClientMainTests
         Assert.Equal(100, md.Total);
     }
 
+    [Fact]
+    public async Task GetVariablesTyped_Simple()
+    {
+        var payload = new
+        {
+            metadata = new { limit = 1, offset = 10, total = 100 },
+            data = new[]
+            {
+                new { id = 1, type = "STRING",  name = "VAR1", description = "desc1" },
+                new { id = 2, type = "BOOLEAN", name = "VAR2", description = "desc2" }
+            }
+        };
+
+        var client = CreateClient(_ => JsonResp(payload));
+        var (vars, md) = await client.GetVariablesTypedAsync();
+
+        Assert.Equal("desc1", vars.First(v => v.Name == "VAR1").Description);
+        Assert.Equal(VariableType.STRING, vars.First(v => v.Name == "VAR1").Type);
+        Assert.Equal(100, md.Total);
+    }
+
+    [Fact]
+    public async Task GetVariablesValuesTyped_Simple()
+    {
+        var payload = new
+        {
+            metadata = new { limit = 2, offset = 0, total = 2 },
+            data = new object[]
+            {
+                new { id = 1, variable_id = 1, content = new Dictionary<string, object> { ["value"] = "Value1" } },
+                new { id = 2, variable_id = 2, content = new Dictionary<string, object> { ["value"] = true } }
+            }
+        };
+
+        var client = CreateClient(_ => JsonResp(payload));
+        var (values, md) = await client.GetVariablesValuesTypedAsync();
+
+        Assert.Equal("Value1", values.First(v => v.VariableId == 1).Content.GetProperty("value").GetString());
+        Assert.True(values.First(v => v.VariableId == 2).Content.GetProperty("value").GetBoolean());
+        Assert.Equal(2, md.Total);
+    }
+
+    [Fact]
+    public async Task FillEnvVars_SetsEnvironmentVariables()
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+
+            var client = CreateClient(req =>
+            {
+                var path = req.RequestUri!.AbsolutePath;
+
+                if (path == "/v1/variables")
+                {
+                    return JsonResp(new
+                    {
+                        metadata = new { limit = 2, offset = 0, total = 2 },
+                        data = new[]
+                        {
+                            new { id = 1, name = "VAR1", type = "STRING", description = "desc1" },
+                            new { id = 2, name = "VAR2", type = "BOOLEAN", description = "desc2" }
+                        }
+                    });
+                }
+
+                if (path == "/v1/variables-values")
+                {
+                    return JsonResp(new
+                    {
+                        metadata = new { limit = 2, offset = 0, total = 2 },
+                        data = new object[]
+                        {
+                            new { id = 1, variable_id = 1, content = new Dictionary<string, object> { ["value"] = "Value1" } },
+                            new { id = 2, variable_id = 2, content = new Dictionary<string, object> { ["value"] = true } }
+                        }
+                    });
+                }
+
+                return JsonResp(new { }, HttpStatusCode.InternalServerError);
+            });
+
+            await client.FillEnvVarsAsync();
+
+            Assert.Equal("Value1", Environment.GetEnvironmentVariable("VAR1"));
+            Assert.Equal("True", Environment.GetEnvironmentVariable("VAR2"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+        }
+    }
+
+    [Fact]
+    public async Task FillEnvVars_UsesCacheFallback()
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+
+            var cache = new MemoryCache();
+            var failFillRequests = false;
+
+            var client = CreateClient(req =>
+            {
+                var path = req.RequestUri!.AbsolutePath;
+
+                if (failFillRequests && (path == "/v1/variables" || path == "/v1/variables-values"))
+                    return JsonResp(new { }, HttpStatusCode.InternalServerError);
+
+                if (path == "/v1/variables-values-by-name/VAR1/content")
+                    return JsonResp(new { value = "ValueFromCache1" });
+
+                if (path == "/v1/variables-values-by-name/VAR2/content")
+                    return JsonResp(new { value = true });
+
+                if (path == "/v1/variables" || path == "/v1/variables-values")
+                    return JsonResp(new { }, HttpStatusCode.InternalServerError);
+
+                return JsonResp(new { }, HttpStatusCode.InternalServerError);
+            }, cacheStore: cache);
+
+            await client.GetAsync("VAR1");
+            await client.GetAsync("VAR2");
+
+            failFillRequests = true;
+            await client.FillEnvVarsAsync();
+
+            Assert.Equal("ValueFromCache1", Environment.GetEnvironmentVariable("VAR1"));
+            Assert.Equal("True", Environment.GetEnvironmentVariable("VAR2"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VAR1", null);
+            Environment.SetEnvironmentVariable("VAR2", null);
+        }
+    }
+
     /* ---------- helper ---------- */
     private static EnvbeeClient CreateClient(
         Func<HttpRequestMessage, HttpResponseMessage?> responder,
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage?>>? asyncResponder = null,
         Secret? encKey = null,
-        ICacheStore? cacheStore = null)
+        ICacheStore? cacheStore = null,
+        string? cachePath = null,
+        double? timeoutSeconds = null)
     {
-        var handler = new FakeHttpHandler { Responder = responder };
+        var handler = new FakeHttpHandler { Responder = responder, AsyncResponder = asyncResponder };
 
         // Build the client fluently
         var builder = EnvbeeClientBuilder.Create()
@@ -171,6 +411,12 @@ public class EnvbeeClientMainTests
 
         if (encKey is { } key)
             builder.WithEncryptionKey(key);
+
+        if (!string.IsNullOrEmpty(cachePath))
+            builder.WithCachePath(cachePath);
+
+        if (timeoutSeconds.HasValue)
+            builder.WithTimeoutSeconds(timeoutSeconds.Value);
 
         var client = builder.Build();
 

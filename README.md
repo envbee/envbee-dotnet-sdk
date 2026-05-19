@@ -42,7 +42,8 @@ using Envbee.SDK;
 var client = new EnvbeeClient(
     apiKey: "your_api_key",
     apiSecret: "your_api_secret",
-    encKey: "encryption-key-goes-here" // optional
+    encKey: "encryption-key-goes-here", // optional
+    timeoutSeconds: 4 // optional, default 4
 );
 
 string? value = await client.GetAsync("VariableName");
@@ -54,6 +55,7 @@ Or using the builder:
 var client = EnvbeeClientBuilder.Create()
     .WithCredentials("your_api_key", "your_api_secret")
     .WithEncryptionKey("32-byte-encryption-key-goes-here")
+    .WithTimeoutSeconds(4)
     .Build();
 ```
 
@@ -83,6 +85,10 @@ Explicit parameters take precedence over environment variables.
 
 - `Task<object?> GetAsync(string variableName)` — fetches a variable and returns its value as `string`, `decimal`, `int`, `double` or `bool`
 - `Task<(IReadOnlyList<JsonElement> Data, Metadata Meta)> GetVariablesAsync(int? offset = null, int? limit = null)` — fetches variable metadata with pagination
+- `Task<(IReadOnlyList<JsonElement> Data, Metadata Meta)> GetVariablesValuesAsync(int? offset = null, int? limit = null)` — fetches variable values with pagination
+- `Task<(IReadOnlyList<Variable> Data, Metadata Meta)> GetVariablesTypedAsync(int? offset = null, int? limit = null)` — fetches typed variable metadata with pagination
+- `Task<(IReadOnlyList<VariableValue> Data, Metadata Meta)> GetVariablesValuesTypedAsync(int? offset = null, int? limit = null)` — fetches typed variable values with pagination
+- `Task FillEnvVarsAsync(IReadOnlyCollection<string>? variableNames = null)` — sets current process environment variables from Envbee, with cache fallback when API is unavailable
 
 ## Encryption
 
@@ -110,6 +116,7 @@ The SDK caches variables locally to provide fallback data when offline or the AP
 
 - Encryption key is never stored in cache or sent to API.
 - All encryption/decryption happens locally with AES-256-GCM.
+- If disk cache is unavailable (permission/path issues), the SDK logs a warning and falls back to in-memory cache for the current process.
 
 ## Dependency Injection
 
