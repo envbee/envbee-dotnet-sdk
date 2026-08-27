@@ -325,8 +325,8 @@ public class EnvbeeClientMainTests
                         metadata = new { limit = 2, offset = 0, total = 2 },
                         data = new object[]
                         {
-                            new { id = 1, variable_id = 1, content = new Dictionary<string, object> { ["value"] = "Value1" } },
-                            new { id = 2, variable_id = 2, content = new Dictionary<string, object> { ["value"] = true } }
+                            new { id = 101, variable_id = 1, content = new Dictionary<string, object> { ["value"] = "Value1" } },
+                            new { id = 202, variable_id = 2, content = new Dictionary<string, object> { ["value"] = true } }
                         }
                     });
                 }

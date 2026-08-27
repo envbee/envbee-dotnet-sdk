@@ -3,14 +3,34 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Existing version to publish from its v<version> tag
+        required: true
+        type: string
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v5
+        with: { dotnet-version: '8.0.x' }
+      - run: dotnet restore
+      - run: dotnet build -c Release --no-restore
+      - run: dotnet test -c Release --no-build --verbosity normal
+
   release:
+    needs: test
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
       packages: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v6
@@ -27,13 +47,66 @@ jobs:
             semantic-release-dotnet
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-          
-      - name: Pack & Push
+      - name: Pack release package
         if: steps.semrel.outputs.new_release_published == 'true'
         run: |
           dotnet pack Envbee.SDK/Envbee.SDK.csproj -c Release -o ./artifacts
+
+      - name: Log in to NuGet with OIDC
+        if: steps.semrel.outputs.new_release_published == 'true'
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Push release package
+        if: steps.semrel.outputs.new_release_published == 'true'
+        run: |
           dotnet nuget push ./artifacts/*.nupkg \
-            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+
+  publish-existing-version:
+    needs: test
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v6
+        with:
+          ref: v${{ inputs.expected_version }}
+
+      - uses: actions/setup-dotnet@v5
+        with: { dotnet-version: '8.0.x' }
+
+      - name: Restore and test release tag
+        run: |
+          dotnet restore
+          dotnet build -c Release --no-restore
+          dotnet test -c Release --no-build --verbosity normal
+
+      - name: Pack existing version
+        run: |
+          dotnet pack Envbee.SDK/Envbee.SDK.csproj \
+            -c Release \
+            -o ./artifacts \
+            -p:PackageVersion=${{ inputs.expected_version }}
+
+      - name: Log in to NuGet with OIDC
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Push existing version
+        run: |
+          dotnet nuget push ./artifacts/*.nupkg \
+            --api-key ${{ steps.nuget-login.outputs.NUGET_API_KEY }} \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
